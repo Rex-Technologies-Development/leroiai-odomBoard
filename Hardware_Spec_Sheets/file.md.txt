@@ -1,8 +1,12 @@
 All odom boards share the following common components: 
 Mcu: esp32-c6-dev-kit from waveshare 
-
-
+Mux: TCA9548A 1-to-8 I2C Mux 
+Opticals: VL53L0X Time-of-Flight (ToF)
 
 
 The following components are exclusive to V1: 
 Gyro: WitMotion WT901 9-axis gyro
+
+
+The following components are exclusive to V2: 
+Gyro: EVAL-ADXRS453Z
