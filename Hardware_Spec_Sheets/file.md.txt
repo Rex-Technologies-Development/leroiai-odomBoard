@@ -1,0 +1,8 @@
+All odom boards share the following common components: 
+Mcu: esp32-c6-dev-kit from waveshare 
+
+
+
+
+The following components are exclusive to V1: 
+Gyro: WitMotion WT901 9-axis gyro
