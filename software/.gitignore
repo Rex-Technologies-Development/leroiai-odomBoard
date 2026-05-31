@@ -1,0 +1,35 @@
+# ESP-IDF build outputs
+build/
+managed_components/
+dependencies.lock
+
+# Local sdkconfig copies (real sdkconfig is tracked)
+sdkconfig.old
+sdkconfig.bak
+sdkconfig.ci
+
+# Backups
+*.bak
+*.tmp
+*~
+
+# Editor / IDE
+.vscode/
+.idea/
+.cache/
+.devcontainer/
+.clangd/
+compile_commands.json
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
