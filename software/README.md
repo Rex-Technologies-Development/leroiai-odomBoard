@@ -60,7 +60,26 @@ idf.py build
 
 ### Flash to Board
 
-Identify your serial port (usually `COM3`-`COM5` on Windows, `/dev/ttyUSB0` on Linux):
+#### Find the Serial Port
+
+**Windows (Device Manager):**
+1. Plug in the ESP32-C6 board via USB
+2. Open **Device Manager** (`Win+X` → Device Manager, or search "Device Manager")
+3. Expand **Ports (COM & LPT)**
+4. Look for **Silicon Labs CP210x USB to UART Bridge** (or similar—ESP32 boards use this driver)
+5. Note the COM port number (e.g., `COM3`, `COM4`)
+   - If no device appears, install the [CP210x driver](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers)
+
+**macOS/Linux:**
+```bash
+# List available serial ports
+ls /dev/tty.* /dev/cu.*    # macOS
+ls /dev/ttyUSB* /dev/ttyACM*  # Linux
+```
+
+#### Flash Command
+
+Once you have the port, run:
 
 ```bash
 # Flash and start monitoring output
@@ -68,6 +87,9 @@ idf.py -p <PORT> flash monitor
 
 # Example on Windows:
 idf.py -p COM3 flash monitor
+
+# Example on macOS/Linux:
+idf.py -p /dev/ttyUSB0 flash monitor
 ```
 
 To exit the monitor, press **Ctrl+]** (or **Cmd+]** on macOS).
