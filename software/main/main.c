@@ -686,8 +686,8 @@
 #define AS5600_REG_RAW      0x0E
 #define AS5600_TICKS_PER_REV 4096
 
-#define ENC1_CHANNEL        7
-#define ENC2_CHANNEL        6
+#define ENC1_CHANNEL        3
+#define ENC2_CHANNEL        2
 
 // Same priority as app_main so FreeRTOS time-slices both fairly.
 // Higher priorities starve app_main because the encoder I2C calls block
@@ -948,69 +948,69 @@ static void pose_snapshot(float *x, float *y, float *theta_rad)
     portEXIT_CRITICAL(&pose_spinlock);
 }
 
-static void odom_task(void *arg)
-{
-    // Wait briefly so app_main has populated current_heading_rad
-    // and the encoder task has filled in initial tick values.
-    vTaskDelay(pdMS_TO_TICKS(50));
+// static void odom_task(void *arg)
+// {
+//     // Wait briefly so app_main has populated current_heading_rad
+//     // and the encoder task has filled in initial tick values.
+//     vTaskDelay(pdMS_TO_TICKS(50));
 
-    int32_t  last_e1, last_e2;
-    int8_t   tmp_dir;
-    uint16_t tmp_raw;
-    encoder_snapshot(&enc1, &last_e1, &tmp_dir, &tmp_raw);
-    encoder_snapshot(&enc2, &last_e2, &tmp_dir, &tmp_raw);
-    float last_theta = current_heading_rad;
+//     int32_t  last_e1, last_e2;
+//     int8_t   tmp_dir;
+//     uint16_t tmp_raw;
+//     encoder_snapshot(&enc1, &last_e1, &tmp_dir, &tmp_raw);
+//     encoder_snapshot(&enc2, &last_e2, &tmp_dir, &tmp_raw);
+//     float last_theta = current_heading_rad;
 
-    TickType_t last_wake = xTaskGetTickCount();
-    while (1) {
-        int32_t e1, e2;
-        encoder_snapshot(&enc1, &e1, &tmp_dir, &tmp_raw);
-        encoder_snapshot(&enc2, &e2, &tmp_dir, &tmp_raw);
-        float curr_theta = current_heading_rad;
+//     TickType_t last_wake = xTaskGetTickCount();
+//     while (1) {
+//         int32_t e1, e2;
+//         encoder_snapshot(&enc1, &e1, &tmp_dir, &tmp_raw);
+//         encoder_snapshot(&enc2, &e2, &tmp_dir, &tmp_raw);
+//         float curr_theta = current_heading_rad;
 
-        int32_t d_e1 = e1 - last_e1;  // horizontal ticks (right positive)
-        int32_t d_e2 = e2 - last_e2;  // vertical ticks (forward positive)
-        float d_theta = curr_theta - last_theta;
+//         int32_t d_e1 = e1 - last_e1;  // horizontal ticks (right positive)
+//         int32_t d_e2 = e2 - last_e2;  // vertical ticks (forward positive)
+//         float d_theta = curr_theta - last_theta;
 
-        float d_horiz = (float)d_e1 * HORIZ_DIST_PER_TICK; // body right
-        float d_vert  = (float)d_e2 * VERT_DIST_PER_TICK;  // body forward
+//         float d_horiz = (float)d_e1 * HORIZ_DIST_PER_TICK; // body right
+//         float d_vert  = (float)d_e2 * VERT_DIST_PER_TICK;  // body forward
 
-        float avg_theta = last_theta + d_theta * 0.5f;
+//         float avg_theta = last_theta + d_theta * 0.5f;
 
-        float local_x, local_y;
-        if (fabsf(d_theta) < 1e-4f) {
-            local_x = d_horiz;
-            local_y = d_vert;
-        } else {
-            // Chord-of-arc correction with tracker offsets baked in.
-            // HORIZ_OFFSET is forward-distance to horizontal wheel: a wheel
-            // ahead of center moves rightward during CW rotation, so the
-            // measured d_horiz must have HORIZ_OFFSET*d_theta subtracted.
-            // VERT_OFFSET is right-distance to vertical wheel: a wheel right
-            // of center moves backward during CW rotation, so VERT_OFFSET*
-            // d_theta is added back.
-            float k = 2.0f * sinf(d_theta * 0.5f) / d_theta;
-            local_x = k * (d_horiz - HORIZ_OFFSET * d_theta);
-            local_y = k * (d_vert  + VERT_OFFSET  * d_theta);
-        }
+//         float local_x, local_y;
+//         if (fabsf(d_theta) < 1e-4f) {
+//             local_x = d_horiz;
+//             local_y = d_vert;
+//         } else {
+//             // Chord-of-arc correction with tracker offsets baked in.
+//             // HORIZ_OFFSET is forward-distance to horizontal wheel: a wheel
+//             // ahead of center moves rightward during CW rotation, so the
+//             // measured d_horiz must have HORIZ_OFFSET*d_theta subtracted.
+//             // VERT_OFFSET is right-distance to vertical wheel: a wheel right
+//             // of center moves backward during CW rotation, so VERT_OFFSET*
+//             // d_theta is added back.
+//             float k = 2.0f * sinf(d_theta * 0.5f) / d_theta;
+//             local_x = k * (d_horiz - HORIZ_OFFSET * d_theta);
+//             local_y = k * (d_vert  + VERT_OFFSET  * d_theta);
+//         }
 
-        // Body -> world: 0 rad faces +Y, theta increases CW.
-        float dx_world =  local_x * cosf(avg_theta) + local_y * sinf(avg_theta);
-        float dy_world = -local_x * sinf(avg_theta) + local_y * cosf(avg_theta);
+//         // Body -> world: 0 rad faces +Y, theta increases CW.
+//         float dx_world =  local_x * cosf(avg_theta) + local_y * sinf(avg_theta);
+//         float dy_world = -local_x * sinf(avg_theta) + local_y * cosf(avg_theta);
 
-        portENTER_CRITICAL(&pose_spinlock);
-        pose_x += dx_world;
-        pose_y += dy_world;
-        pose_theta = curr_theta;
-        portEXIT_CRITICAL(&pose_spinlock);
+//         portENTER_CRITICAL(&pose_spinlock);
+//         pose_x += dx_world;
+//         pose_y += dy_world;
+//         pose_theta = curr_theta;
+//         portEXIT_CRITICAL(&pose_spinlock);
 
-        last_e1 = e1;
-        last_e2 = e2;
-        last_theta = curr_theta;
+//         last_e1 = e1;
+//         last_e2 = e2;
+//         last_theta = curr_theta;
 
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(ODOM_TASK_PERIOD_MS));
-    }
-}
+//         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(ODOM_TASK_PERIOD_MS));
+//     }
+// }
 
 static void i2c_init(void)
 {
@@ -1181,8 +1181,8 @@ void app_main(void)
     xTaskCreate(encoder_task, "encoder_task", ENCODER_TASK_STACK,
                 NULL, ENCODER_TASK_PRIORITY, NULL);
 
-    xTaskCreate(odom_task, "odom_task", ODOM_TASK_STACK,
-                NULL, ODOM_TASK_PRIORITY, NULL);
+    // xTaskCreate(odom_task, "odom_task", ODOM_TASK_STACK,
+    //             NULL, ODOM_TASK_PRIORITY, NULL);
 
     last_time_us = esp_timer_get_time();
     TickType_t next_loop_time = xTaskGetTickCount();
