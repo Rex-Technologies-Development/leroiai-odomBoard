@@ -638,7 +638,8 @@ void app_main(void)
                 uart_write_bytes(UART_PORT_NUM, msg, len);
             }
 
-            ESP_LOGW(TAG, "Heading: %.4f°", heading_deg);
+            ESP_LOGW(TAG, "DENC1=%ld DENC2=%ld H=%.4f°",
+                     (long)denc1_out, (long)denc2_out, heading_deg);
         }
 
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(SENSOR_LOOP_MS));
