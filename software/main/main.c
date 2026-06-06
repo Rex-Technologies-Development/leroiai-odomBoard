@@ -1162,17 +1162,17 @@ static void wait_until_next_loop(TickType_t *last_wake_time)
 void app_main(void)
 {
     i2c_init();
-    uart_init();
+    // uart_init();
 
     printf("ESP32-C6 odometry board started\n");
 
     // Widen the IMU's gyro LPF before calibration so the bias estimate is
     // measured under the same filter setting we'll use during operation.
-    wit_configure_lowpass();
+    // wit_configure_lowpass();
     // Give the IMU a moment to apply the new bandwidth before sampling.
-    vTaskDelay(pdMS_TO_TICKS(50));
+    // vTaskDelay(pdMS_TO_TICKS(50));
 
-    calibrate_gyro_bias();
+    // calibrate_gyro_bias();
 
     hx = 0.0f;
     hy = 0.0f;
@@ -1201,105 +1201,96 @@ void app_main(void)
     while (1) {
         uint8_t data[24];
 
-        esp_err_t ret = wit_read_registers(0x34, data, sizeof(data));
+        // esp_err_t ret = wit_read_registers(0x34, data, sizeof(data));
 
-        if (ret != ESP_OK) {
-            char error_msg[96];
+        // if (ret != ESP_OK) {
+        //     wait_until_next_loop(&next_loop_time);
+        //     continue;
+        // }
 
-            snprintf(error_msg, sizeof(error_msg),
-                     "ERR,WIT_READ_FAIL,%s\n",
-                     esp_err_to_name(ret));
+        // int16_t ax_raw = read_i16_le(data[0], data[1]);
+        // int16_t ay_raw = read_i16_le(data[2], data[3]);
+        // int16_t az_raw = read_i16_le(data[4], data[5]);
 
-            uart_write_bytes(UART_PORT_NUM, error_msg, strlen(error_msg));
-            printf("%s", error_msg);
+        // int16_t gx_raw = read_i16_le(data[6], data[7]);
+        // int16_t gy_raw = read_i16_le(data[8], data[9]);
+        // int16_t gz_raw = read_i16_le(data[10], data[11]);
 
-            wait_until_next_loop(&next_loop_time);
-            continue;
-        }
+        // int16_t roll_raw  = read_i16_le(data[18], data[19]);
+        // int16_t pitch_raw = read_i16_le(data[20], data[21]);
+        // int16_t yaw_raw   = read_i16_le(data[22], data[23]);
 
-        int16_t ax_raw = read_i16_le(data[0], data[1]);
-        int16_t ay_raw = read_i16_le(data[2], data[3]);
-        int16_t az_raw = read_i16_le(data[4], data[5]);
+        // float ax = ax_raw / 32768.0f * 16.0f;
+        // float ay = ay_raw / 32768.0f * 16.0f;
+        // float az = az_raw / 32768.0f * 16.0f;
 
-        int16_t gx_raw = read_i16_le(data[6], data[7]);
-        int16_t gy_raw = read_i16_le(data[8], data[9]);
-        int16_t gz_raw = read_i16_le(data[10], data[11]);
+        // float gx = gx_raw / 32768.0f * 2000.0f;
+        // float gy = gy_raw / 32768.0f * 2000.0f;
+        // float gz = gz_raw / 32768.0f * 2000.0f;
 
-        int16_t roll_raw  = read_i16_le(data[18], data[19]);
-        int16_t pitch_raw = read_i16_le(data[20], data[21]);
-        int16_t yaw_raw   = read_i16_le(data[22], data[23]);
-
-        float ax = ax_raw / 32768.0f * 16.0f;
-        float ay = ay_raw / 32768.0f * 16.0f;
-        float az = az_raw / 32768.0f * 16.0f;
-
-        float gx = gx_raw / 32768.0f * 2000.0f;
-        float gy = gy_raw / 32768.0f * 2000.0f;
-        float gz = gz_raw / 32768.0f * 2000.0f;
-
-        float roll  = roll_raw / 32768.0f * 180.0f;
-        float pitch = pitch_raw / 32768.0f * 180.0f;
-        float yaw   = yaw_raw / 32768.0f * 180.0f;
+        // float roll  = roll_raw / 32768.0f * 180.0f;
+        // float pitch = pitch_raw / 32768.0f * 180.0f;
+        // float yaw   = yaw_raw / 32768.0f * 180.0f;
 
         int64_t now_us = esp_timer_get_time();
         float dt = (now_us - last_time_us) / 1000000.0f;
         last_time_us = now_us;
 
-        // Pre-deadband residual (post-bias) for stillness detection and
-        // bias refinement. Honest noise check; we don't want the deadband
-        // hiding small biases from the bias filter.
-        float cgx_raw = gx - gx_bias;
-        float cgy_raw = gy - gy_bias;
-        float cgz_raw = gz - gz_bias;
+        // // Pre-deadband residual (post-bias) for stillness detection and
+        // // bias refinement. Honest noise check; we don't want the deadband
+        // // hiding small biases from the bias filter.
+        // float cgx_raw = gx - gx_bias;
+        // float cgy_raw = gy - gy_bias;
+        // float cgz_raw = gz - gz_bias;
 
-        bool still = (fabsf(cgx_raw) < STILL_GYRO_THRESHOLD) &&
-                     (fabsf(cgy_raw) < STILL_GYRO_THRESHOLD) &&
-                     (fabsf(cgz_raw) < STILL_GYRO_THRESHOLD);
+        // bool still = (fabsf(cgx_raw) < STILL_GYRO_THRESHOLD) &&
+        //              (fabsf(cgy_raw) < STILL_GYRO_THRESHOLD) &&
+        //              (fabsf(cgz_raw) < STILL_GYRO_THRESHOLD);
 
-        if (still) {
-            if (still_count < STILL_REQUIRED_SAMPLES) {
-                still_count++;
-            } else {
-                // Stationary long enough: nudge bias toward the current
-                // gyro reading. Gain = dt / tau gives a 1-tau exponential.
-                float gain = dt / BIAS_FILTER_TAU_S;
-                gx_bias += gain * cgx_raw;
-                gy_bias += gain * cgy_raw;
-                gz_bias += gain * cgz_raw;
-            }
-        } else {
-            still_count = 0;
-        }
+        // if (still) {
+        //     if (still_count < STILL_REQUIRED_SAMPLES) {
+        //         still_count++;
+        //     } else {
+        //         // Stationary long enough: nudge bias toward the current
+        //         // gyro reading. Gain = dt / tau gives a 1-tau exponential.
+        //         float gain = dt / BIAS_FILTER_TAU_S;
+        //         gx_bias += gain * cgx_raw;
+        //         gy_bias += gain * cgy_raw;
+        //         gz_bias += gain * cgz_raw;
+        //     }
+        // } else {
+        //     still_count = 0;
+        // }
 
-        float cgx = apply_deadband(cgx_raw);
-        float cgy = apply_deadband(cgy_raw);
-        float cgz = apply_deadband(cgz_raw);
+        // float cgx = apply_deadband(cgx_raw);
+        // float cgy = apply_deadband(cgy_raw);
+        // float cgz = apply_deadband(cgz_raw);
 
         // Trapezoidal integration:
         //   theta_new = theta_old + 0.5 * (omega_old + omega_new) * dt
         // Equivalent to the 2nd-order Taylor expansion using angular
         // acceleration alpha = (omega_new - omega_old)/dt.
-        hx += 0.5f * (last_cgx + cgx) * dt;
-        hy += 0.5f * (last_cgy + cgy) * dt;
-        hz += 0.5f * (last_cgz + cgz) * dt;
-        last_cgx = cgx;
-        last_cgy = cgy;
-        last_cgz = cgz;
+        // hx += 0.5f * (last_cgx + cgx) * dt;
+        // hy += 0.5f * (last_cgy + cgy) * dt;
+        // hz += 0.5f * (last_cgz + cgz) * dt;
+        // last_cgx = cgx;
+        // last_cgy = cgy;
+        // last_cgz = cgz;
 
-        float selected_heading = 0.0f;
+        // float selected_heading = 0.0f;
 
-        if (HEADING_AXIS == 0) {
-            selected_heading = hx;
-        } else if (HEADING_AXIS == 1) {
-            selected_heading = hy;
-        } else {
-            selected_heading = hz;
-        }
+        // if (HEADING_AXIS == 0) {
+        //     selected_heading = hx;
+        // } else if (HEADING_AXIS == 1) {
+        //     selected_heading = hy;
+        // } else {
+        //     selected_heading = hz;
+        // }
 
-        selected_heading = selected_heading * HEADING_SIGN * HEADING_SCALE;
+        // selected_heading = selected_heading * HEADING_SIGN * HEADING_SCALE;
 
         // Publish heading in radians for the odometry task.
-        current_heading_rad = selected_heading * (float)(M_PI / 180.0);
+        // current_heading_rad = selected_heading * (float)(M_PI / 180.0);
 
         int32_t  e1_ticks, e2_ticks;
         int8_t   e1_dir, e2_dir;
@@ -1307,9 +1298,9 @@ void app_main(void)
         encoder_snapshot(&enc1, &e1_ticks, &e1_dir, &e1_raw);
         encoder_snapshot(&enc2, &e2_ticks, &e2_dir, &e2_raw);
 
-        float px, py, ptheta_rad;
-        pose_snapshot(&px, &py, &ptheta_rad);
-        float ptheta_deg = ptheta_rad * (float)(180.0 / M_PI);
+        // float px, py, ptheta_rad;
+        // pose_snapshot(&px, &py, &ptheta_rad);
+        // float ptheta_deg = ptheta_rad * (float)(180.0 / M_PI);
 
         char msg[384];
 
@@ -1355,7 +1346,7 @@ void app_main(void)
                      (unsigned long)ms_now,
                      (long)e1_ticks,
                      (long)e2_ticks,
-                     selected_heading);
+                     0.0);
 
             uart_write_bytes(UART_PORT_NUM, msg, strlen(msg));
             printf("%s", msg);
