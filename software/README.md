@@ -1,9 +1,10 @@
 # LeroiAI Odometry Board
 
 ESP32-C6 firmware for the LeroiAI odometry board. Reads two AS5600 magnetic
-encoders through a TCA9548A I2C mux, integrates an ADXRS453Z single-axis rate
-gyro (Z/yaw) over SPI for heading, and streams the raw incremental encoder
-deltas plus heading over UART at 50 Hz.
+encoders and four VL53L0X time-of-flight distance sensors through a TCA9548A
+I2C mux, integrates an ADXRS453Z single-axis rate gyro (Z/yaw) over SPI for
+heading, and streams the raw incremental encoder deltas, heading, and TOF
+distances over UART at 50 Hz.
 
 ## Hardware
 
@@ -12,9 +13,14 @@ deltas plus heading over UART at 50 Hz.
 - **TCA9548A I2C mux** at address `0x70`
   - Channel 6: AS5600 #1 (`0x36`) — encoder 1, physically closest to the MCU
   - Channel 7: AS5600 #2 (`0x36`) — encoder 2
+  - Channels 5, 1, 3, 2: VL53L0X TOF sensors (`0x29` each) — packet fields
+    TOF1, TOF2, TOF3, TOF4 respectively
 - **ADXRS453Z gyro (SPI2):** SCK = GPIO 10, MOSI = GPIO 11, MISO = GPIO 5,
   CS = GPIO 18, 1 MHz, SPI mode 0
 - **UART out (→ TTL/RS485):** TX = GPIO 17, RX = GPIO 16, 115200 baud
+
+> All four VL53L0X sensors share I2C address `0x29`; the mux is what
+> disambiguates them, so no per-sensor XSHUT address reassignment is needed.
 
 See `main/main.c` (`PIN SETTINGS` / `I2C DEVICE SETTINGS` / `SPI / ADXRS453
 SETTINGS` sections) for everything that's configurable without code changes.
@@ -110,7 +116,7 @@ idf.py -p <PORT> erase-flash  # Erase the entire flash (factory reset)
 UART streams at 50 Hz with the following format (newline-terminated):
 
 ```
-DENC1=-12,DENC2=8,H=45.3456
+DENC1=-12,DENC2=8,H=45.3456,TOF1=212,TOF2=8190,TOF3=540,TOF4=133
 ```
 
 ### Fields
@@ -120,9 +126,13 @@ DENC1=-12,DENC2=8,H=45.3456
   UART packet, same units as DENC1.
 - **H** — Integrated gyro heading in degrees (Z-axis / yaw only). The ADXRS453
   is a single-axis rate gyro, integrated over time.
+- **TOF1–TOF4** — VL53L0X distances in **millimeters** (mux channels 5, 1, 3, 2).
+  Out-of-range / no-target reads come back near `8190`. A sensor that fails to
+  initialize reports `0` and is skipped.
 
 Because DENC1/DENC2 are deltas, the host accumulates them to recover absolute
 position. The encoder delta wrapping (±2048 tick rollover) is handled on-device.
+The same fields are also echoed to the serial monitor each output cycle.
 
 ### Converting Ticks to Distance
 
@@ -151,10 +161,20 @@ Example with a 2.0 in wheel: 4096 ticks = 1 full revolution = 2π inches ≈
 - **Gyro deadband** (`GYRO_DEADBAND_DPS` in [main.c](main/main.c#L118))
   suppresses tiny near-zero residuals after bias calibration. Keep it small.
 
+- **Encoder direction** (`ENC1_SIGN` / `ENC2_SIGN` in [main.c](main/main.c#L77))
+  flips a tracker's reported sign to match the V5 brain's coordinate convention.
+  Both are `-1` by default.
+
+- **TOF sensors** run in continuous ranging mode and are polled non-blocking,
+  one sensor per loop iteration (each refreshes at ~50 Hz). Distances are raw
+  VL53L0X millimeters — no scaling is applied. If a sensor doesn't appear on its
+  mux channel at boot it is logged and skipped (reports `0`). The mux channel →
+  TOF field mapping lives in `VL53L0X_CH_*` in [main.c](main/main.c#L77).
+
 After any calibration changes, rebuild and flash using the commands above.
 
 ## TODO
 
-- Update the 81208U 15-inch odom board — either build another board with a new
-  layout, or add support for the TOF sensors.
+- Update the 81208U 15-inch odom board — build another board with a new layout.
+  (TOF sensor support is now implemented; see the VL53L0X section in `main.c`.)
 ```
