@@ -74,6 +74,11 @@
 #define ENC1_CHANNEL        6
 #define ENC2_CHANNEL        7
 
+// Per-encoder direction. Flip to -1 if a tracker's sign is backwards for
+// the V5 brain's coordinate convention. Both encoders are flipped.
+#define ENC1_SIGN           (-1)
+#define ENC2_SIGN           (-1)
+
 // Present but unused for now.
 #define VL53L0X_CH_0        5
 #define VL53L0X_CH_1        1
@@ -618,8 +623,8 @@ void app_main(void)
         if (output_countdown >= OUTPUT_DECIMATION) {
             output_countdown = 0;
 
-            int32_t denc1_out = enc1_delta_accum;
-            int32_t denc2_out = enc2_delta_accum;
+            int32_t denc1_out = ENC1_SIGN * enc1_delta_accum;
+            int32_t denc2_out = ENC2_SIGN * enc2_delta_accum;
 
             enc1_delta_accum = 0;
             enc2_delta_accum = 0;

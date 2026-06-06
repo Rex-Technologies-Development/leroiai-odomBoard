@@ -152,4 +152,9 @@ Example with a 2.0 in wheel: 4096 ticks = 1 full revolution = 2π inches ≈
   suppresses tiny near-zero residuals after bias calibration. Keep it small.
 
 After any calibration changes, rebuild and flash using the commands above.
+
+## TODO
+
+- Update the 81208U 15-inch odom board — either build another board with a new
+  layout, or add support for the TOF sensors.
 ```
