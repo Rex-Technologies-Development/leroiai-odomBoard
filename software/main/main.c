@@ -29,15 +29,16 @@
 //
 // Output over UART1 -> TTL side of RS485 module:
 //   DENC1=<delta ticks>,DENC2=<delta ticks>,H=<heading deg>,
-//   TOF1=<mm>,TOF2=<mm>,TOF3=<mm>,TOF4=<mm>
+//   TOF1=<in>,TOF2=<in>,TOF3=<in>,TOF4=<in>
 //
 // Notes:
 //   - DENC1/DENC2 are incremental deltas since the last UART packet,
 //     not accumulated absolute encoder ticks.
 //   - H is integrated gyro heading in degrees (Z-axis rotation only).
 //     ADXRS453 is a single-axis rate gyro, integrated over time.
-//   - TOF1..TOF4 are VL53L0X distances in millimeters. Out-of-range /
-//     no-target reads come back near 8190 mm.
+//   - TOF1..TOF4 are VL53L0X distances in inches, after a fixed offset
+//     (see TOF_OFFSET_IN). Out-of-range / no-target reads come back near
+//     321 in (~8190 mm).
 // ============================================================
 
 // =====================
@@ -91,6 +92,16 @@
 #define VL53L0X_CH_1        1
 #define VL53L0X_CH_2        3
 #define VL53L0X_CH_3        2
+
+// TOF output is reported in inches. 1 inch = 25.4 mm.
+#define MM_PER_INCH         25.4f
+
+// Per-sensor fixed offset (inches) subtracted from each TOF reading to correct
+// a constant optical-window setback. Right side (TOF1/TOF2) reads ~0.75" longer
+// than the others, so it gets a larger offset.
+//   TOF1/TOF2 (right): 15.75" -> 15.0" on top of the base 1.1"
+//   TOF3/TOF4:         base ~1.1"
+static const float TOF_OFFSET_IN[4] = { 1.85f, 1.85f, 1.1f, 1.1f };
 
 // =====================
 // UART SETTINGS
@@ -916,7 +927,7 @@ void app_main(void)
     TickType_t last_wake = xTaskGetTickCount();
 
     ESP_LOGI(TAG, "Streaming UART frames: DENC1=<ticks>,DENC2=<ticks>,H=<deg>,"
-                  "TOF1..4=<mm>");
+                  "TOF1..4=<in>");
 
     while (1) {
         // -------------------------
@@ -1000,28 +1011,36 @@ void app_main(void)
             enc1_delta_accum = 0;
             enc2_delta_accum = 0;
 
+            // Convert mm -> inches and apply the fixed offset (clamp at 0).
+            float tof_in[4];
+            for (int i = 0; i < 4; i++) {
+                tof_in[i] = ((float)tof_mm[i] / MM_PER_INCH) - TOF_OFFSET_IN[i];
+                if (tof_in[i] < 0.0f) {
+                    tof_in[i] = 0.0f;
+                }
+            }
+
             char msg[160];
             int len = snprintf(
                 msg,
                 sizeof(msg),
-                "DENC1=%ld,DENC2=%ld,H=%.4f,TOF1=%u,TOF2=%u,TOF3=%u,TOF4=%u\n",
+                "DENC1=%ld,DENC2=%ld,H=%.4f,TOF1=%.2f,TOF2=%.2f,TOF3=%.2f,TOF4=%.2f\n",
                 (long)denc1_out,
                 (long)denc2_out,
                 heading_deg,
-                (unsigned)tof_mm[0],
-                (unsigned)tof_mm[1],
-                (unsigned)tof_mm[2],
-                (unsigned)tof_mm[3]
+                tof_in[0],
+                tof_in[1],
+                tof_in[2],
+                tof_in[3]
             );
 
             if (len > 0) {
                 uart_write_bytes(UART_PORT_NUM, msg, len);
             }
 
-            ESP_LOGW(TAG, "DENC1=%ld DENC2=%ld H=%.4f° TOF=[%u %u %u %u] mm",
+            ESP_LOGW(TAG, "DENC1=%ld DENC2=%ld H=%.4f° TOF=[%.2f %.2f %.2f %.2f] in",
                      (long)denc1_out, (long)denc2_out, heading_deg,
-                     (unsigned)tof_mm[0], (unsigned)tof_mm[1],
-                     (unsigned)tof_mm[2], (unsigned)tof_mm[3]);
+                     tof_in[0], tof_in[1], tof_in[2], tof_in[3]);
         }
 
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(SENSOR_LOOP_MS));
