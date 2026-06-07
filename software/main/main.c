@@ -35,9 +35,8 @@
 // =====================
 
 // I2C mux bus
-// NOTE: SDA/SCL temporarily SWAPPED as a wiring test (normally SDA=6, SCL=7).
-#define I2C_SDA_PIN         GPIO_NUM_7
-#define I2C_SCL_PIN         GPIO_NUM_6
+#define I2C_SDA_PIN         GPIO_NUM_6
+#define I2C_SCL_PIN         GPIO_NUM_7
 
 // UART to TTL/RS485 module
 #define UART_TX_PIN         GPIO_NUM_17
@@ -57,8 +56,8 @@
 #define AS5600_TICKS_PER_REV 4096
 
 // Mux wiring:
-// Encoder 1: channel 4.
-#define ENC1_CHANNEL        4
+// Encoder 1: channel 1.
+#define ENC1_CHANNEL        1
 
 // Encoder direction. Flip to -1 if the tracker's sign is backwards for
 // the V5 brain's coordinate convention.
@@ -208,7 +207,9 @@ static void i2c_init(void)
         .scl_io_num = I2C_SCL_PIN,
         .sda_io_num = I2C_SDA_PIN,
         .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
+        // TEST: internal pull-ups DISABLED so the bus only stays high if the
+        // mux board's own pull-ups are powered and connected (normally true).
+        .flags.enable_internal_pullup = false,
     };
 
     ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &i2c_bus_handle));
