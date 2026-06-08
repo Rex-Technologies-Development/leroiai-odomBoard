@@ -12,6 +12,7 @@
 #include "driver/uart.h"
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
+#include "driver/usb_serial_jtag.h"
 
 #include "esp_log.h"
 #include "esp_err.h"
@@ -144,8 +145,9 @@ static const float TOF_OFFSET_IN[4] = { 1.85f, 1.85f, 1.1f, 1.1f };
 #define HEADING_SCALE       1.00f
 
 // Startup bias calibration. Keep the robot still during this period.
-#define GYRO_BIAS_SAMPLES   2000
-#define GYRO_BIAS_DELAY_MS  5
+// 1500 samples x 2 ms = ~3 s (under the 4 s power-up budget).
+#define GYRO_BIAS_SAMPLES   1500
+#define GYRO_BIAS_DELAY_MS  2
 
 static const char *TAG = "ESP32C6_ODOM_RAW";
 
@@ -492,14 +494,15 @@ static void spi_init_adxrs453(void)
     }
 }
 
-static float calibrate_gyro_bias_dps(void)
+static float calibrate_gyro_bias_dps(int samples, int delay_ms)
 {
-    ESP_LOGI(TAG, "Calibrating ADXRS453 gyro bias. Keep robot completely still.");
+    ESP_LOGI(TAG, "Calibrating ADXRS453 gyro bias (%d samples). Keep board still.",
+             samples);
 
     float sum = 0.0f;
     int good = 0;
 
-    for (int i = 0; i < GYRO_BIAS_SAMPLES; i++) {
+    for (int i = 0; i < samples; i++) {
         float rate = 0.0f;
         esp_err_t ret = adxrs453_read_rate_dps(&rate);
 
@@ -508,7 +511,7 @@ static float calibrate_gyro_bias_dps(void)
             good++;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(GYRO_BIAS_DELAY_MS));
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 
     if (good == 0) {
@@ -840,6 +843,46 @@ static esp_err_t vl53l0x_read_mm(uint8_t channel, uint16_t *mm)
 }
 
 // ============================================================
+// USB-C COMMAND INTERFACE (USB Serial/JTAG)
+// ------------------------------------------------------------
+// The native USB-C port is a secondary (output-only) console, so the
+// USB Serial/JTAG peripheral is free for us to read commands from the
+// Jetson. Single-character command:
+//   'R' (or 'Z') -> reset the gyro heading to 0 (instant, heading only)
+// ============================================================
+
+static void usb_cmd_init(void)
+{
+    usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    esp_err_t ret = usb_serial_jtag_driver_install(&cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "USB Serial/JTAG command input unavailable: %s",
+                 esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "USB Serial/JTAG command input ready (R=reset gyro heading)");
+    }
+}
+
+// Non-blocking. Scans any bytes the Jetson sent and returns the last
+// recognized command character, or 0 if none. Tolerates line endings and
+// whole words (e.g. "RESET\n" matches 'R', "ZERO\n" matches 'Z').
+static char usb_cmd_poll(void)
+{
+    uint8_t buf[32];
+    int n = usb_serial_jtag_read_bytes(buf, sizeof(buf), 0);
+    char cmd = 0;
+
+    for (int i = 0; i < n; i++) {
+        char c = (char)buf[i];
+        if (c == 'Z' || c == 'z' || c == 'R' || c == 'r') {
+            cmd = c;  // last recognized command in this batch wins
+        }
+    }
+
+    return cmd;
+}
+
+// ============================================================
 // MAIN
 // ============================================================
 
@@ -848,8 +891,9 @@ void app_main(void)
     i2c_init();
     uart_init();
     spi_init_adxrs453();
+    usb_cmd_init();
 
-    float gyro_bias_dps = calibrate_gyro_bias_dps();
+    float gyro_bias_dps = calibrate_gyro_bias_dps(GYRO_BIAS_SAMPLES, GYRO_BIAS_DELAY_MS);
 
     // Initialize encoders so the first packet does not contain a fake jump.
     uint16_t enc1_last_raw = 0;
@@ -930,6 +974,16 @@ void app_main(void)
                   "TOF1..4=<in>");
 
     while (1) {
+        // -------------------------
+        // 0) Handle gyro-reset commands from the Jetson over USB-C
+        // -------------------------
+        char cmd = usb_cmd_poll();
+        if (cmd == 'R' || cmd == 'r' || cmd == 'Z' || cmd == 'z') {
+            heading_deg = 0.0f;
+            have_last_rate = false;
+            ESP_LOGW(TAG, "CMD %c: gyro heading reset to 0", cmd);
+        }
+
         // -------------------------
         // 1) Read encoders and accumulate deltas
         // -------------------------
