@@ -31,16 +31,16 @@
 //
 // Output over UART1 -> TTL side of RS485 module:
 //   DENC1=<delta ticks>,DENC2=<delta ticks>,H=<heading deg>,
-//   TOF1=<in>,TOF2=<in>,TOF3=<in>,TOF4=<in>
+//   TOF=[<front> <right> <left> <lback>]
 //
 // Notes:
 //   - DENC1 = vertical encoder, DENC2 = horizontal encoder. Both are
 //     incremental deltas since the last UART packet, not absolute ticks.
 //   - H (heading) is always 0.0 -- this board has no gyro, but the field is
 //     kept so the packet matches the other boards' format.
-//   - TOF1..TOF4 are VL53L0X distances in inches, after a fixed per-sensor
-//     offset (see TOF_OFFSET_IN). TOF1=front, TOF2=right, TOF3=left,
-//     TOF4=left-back. Out-of-range / no-target reads come back near 321 in.
+//   - TOF is a space-separated array of 4 VL53L0X distances in inches, after
+//     a fixed per-sensor offset (see TOF_OFFSET_IN), in order:
+//     [front right left left-back]. Out-of-range reads come back near 321.
 // ============================================================
 
 // =====================
@@ -683,7 +683,7 @@ void app_main(void)
     TickType_t last_wake = xTaskGetTickCount();
 
     ESP_LOGI(TAG, "Streaming UART frames: DENC1=<ticks>,DENC2=<ticks>,H=<deg>,"
-                  "TOF1..4=<in> (front,right,left,lback)");
+                  "TOF=[front right left lback] in");
 
     while (1) {
         // -------------------------
@@ -749,21 +749,21 @@ void app_main(void)
             int len = snprintf(
                 msg,
                 sizeof(msg),
-                "DENC1=%ld,DENC2=%ld,H=%.4f,TOF1=%.2f,TOF2=%.2f,TOF3=%.2f,TOF4=%.2f\n",
+                "DENC1=%ld,DENC2=%ld,H=%.4f,TOF=[%.2f %.2f %.2f %.2f]\n",
                 (long)denc1_out,
                 (long)denc2_out,
                 0.0f,        // H: constant 0 (no gyro on this board)
-                tof_in[0],   // TOF1 = FRONT
-                tof_in[1],   // TOF2 = RIGHT
-                tof_in[2],   // TOF3 = LEFT
-                tof_in[3]    // TOF4 = LBACK
+                tof_in[0],   // TOF[0] = FRONT
+                tof_in[1],   // TOF[1] = RIGHT
+                tof_in[2],   // TOF[2] = LEFT
+                tof_in[3]    // TOF[3] = LBACK
             );
 
             if (len > 0) {
                 uart_write_bytes(UART_PORT_NUM, msg, len);
             }
 
-            ESP_LOGW(TAG, "DENC1=%ld DENC2=%ld H=0.0000 TOF1=%.2f TOF2=%.2f TOF3=%.2f TOF4=%.2f in",
+            ESP_LOGW(TAG, "DENC1=%ld DENC2=%ld H=0.0000 TOF=[%.2f %.2f %.2f %.2f] in",
                      (long)denc1_out, (long)denc2_out,
                      tof_in[0], tof_in[1], tof_in[2], tof_in[3]);
         }
