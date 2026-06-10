@@ -2,7 +2,6 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <math.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -11,35 +10,36 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "driver/i2c_master.h"
-#include "driver/spi_master.h"
-#include "driver/usb_serial_jtag.h"
 
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_timer.h"
 
 // ============================================================
-// ESP32-C6 ODOMETRY SENSOR BOARD
+// ESP32-C6 ODOMETRY SENSOR BOARD  (15-odomBoard)
 // ------------------------------------------------------------
 // Inputs:
 //   - TCA9548A 8-channel I2C mux
-//   - AS5600 encoder #1 on mux channel 6
-//   - AS5600 encoder #2 on mux channel 7
-//   - ADXRS453Z single-axis gyro (Z/yaw) over SPI
-//   - 4x VL53L0X time-of-flight distance sensors on mux channels 5,1,3,2
+//   - AS5600 VERTICAL   encoder on mux channel 6  -> DENC1
+//   - AS5600 HORIZONTAL encoder on mux channel 1  -> DENC2
+//   - 4x VL53L0X time-of-flight distance sensors:
+//       FRONT = channel 2
+//       RIGHT = channel 7
+//       LEFT  = channel 5
+//       LBACK = channel 3  (left-back)
+//   - No gyro on this board.
 //
 // Output over UART1 -> TTL side of RS485 module:
-//   DENC1=<delta ticks>,DENC2=<delta ticks>,H=<heading deg>,
-//   TOF1=<in>,TOF2=<in>,TOF3=<in>,TOF4=<in>
+//   DENC1=<delta ticks>,DENC2=<delta ticks>,
+//   FRONT=<in>,RIGHT=<in>,LEFT=<in>,LBACK=<in>
 //
 // Notes:
-//   - DENC1/DENC2 are incremental deltas since the last UART packet,
-//     not accumulated absolute encoder ticks.
-//   - H is integrated gyro heading in degrees (Z-axis rotation only).
-//     ADXRS453 is a single-axis rate gyro, integrated over time.
-//   - TOF1..TOF4 are VL53L0X distances in inches, after a fixed offset
-//     (see TOF_OFFSET_IN). Out-of-range / no-target reads come back near
-//     321 in (~8190 mm).
+//   - DENC1 = vertical encoder, DENC2 = horizontal encoder. Both are
+//     incremental deltas since the last UART packet, not absolute ticks.
+//   - No heading is sent (this board has no gyro).
+//   - FRONT/RIGHT/LEFT/LBACK are VL53L0X distances in inches, after a fixed
+//     per-sensor offset (see TOF_OFFSET_IN). Out-of-range / no-target reads
+//     come back near 321 in (~8190 mm).
 // ============================================================
 
 // =====================
@@ -53,13 +53,6 @@
 // UART to TTL/RS485 module
 #define UART_TX_PIN         GPIO_NUM_17
 #define UART_RX_PIN         GPIO_NUM_16
-
-// ADXRS453Z SPI
-#define ADXRS_SPI_HOST      SPI2_HOST
-#define ADXRS_SCK_PIN       GPIO_NUM_10
-#define ADXRS_MOSI_PIN      GPIO_NUM_11
-#define ADXRS_MISO_PIN      GPIO_NUM_5
-#define ADXRS_CS_PIN        GPIO_NUM_18
 
 // =====================
 // I2C DEVICE SETTINGS
@@ -77,32 +70,31 @@
 // All four VL53L0X TOF sensors share this address; the mux selects which one.
 #define VL53L0X_ADDR        0x29
 
-// Your current mux wiring:
-// Encoder 1: channel 6, physically closest to MCU.
-// Encoder 2: channel 7.
-#define ENC1_CHANNEL        6
-#define ENC2_CHANNEL        7
+// Encoder mux channels.
+//   Vertical encoder   -> DENC1 (first field)
+//   Horizontal encoder -> DENC2 (second field)
+#define ENC1_CHANNEL        6   // vertical
+#define ENC2_CHANNEL        1   // horizontal
 
 // Per-encoder direction. Flip to -1 if a tracker's sign is backwards for
-// the V5 brain's coordinate convention. Both encoders are flipped.
+// the V5 brain's coordinate convention.
 #define ENC1_SIGN           (-1)
 #define ENC2_SIGN           (-1)
 
-// Four VL53L0X TOF sensors -> packet fields TOF1..TOF4 in this order.
-#define VL53L0X_CH_0        5
-#define VL53L0X_CH_1        1
-#define VL53L0X_CH_2        3
-#define VL53L0X_CH_3        2
+// VL53L0X TOF sensors by physical position -> packet fields in this order:
+//   FRONT, RIGHT, LEFT, LBACK
+#define TOF_FRONT_CH        2
+#define TOF_RIGHT_CH        7
+#define TOF_LEFT_CH         5
+#define TOF_LBACK_CH        3
 
 // TOF output is reported in inches. 1 inch = 25.4 mm.
 #define MM_PER_INCH         25.4f
 
 // Per-sensor fixed offset (inches) subtracted from each TOF reading to correct
-// a constant optical-window setback. Right side (TOF1/TOF2) reads ~0.75" longer
-// than the others, so it gets a larger offset.
-//   TOF1/TOF2 (right): 15.75" -> 15.0" on top of the base 1.1"
-//   TOF3/TOF4:         base ~1.1"
-static const float TOF_OFFSET_IN[4] = { 1.85f, 1.85f, 1.1f, 1.1f };
+// a constant optical-window setback. Order matches FRONT, RIGHT, LEFT, LBACK.
+// Defaulted to the ~1.1" base; recalibrate per sensor against known distances.
+static const float TOF_OFFSET_IN[4] = { 1.1f, 1.1f, 1.1f, 1.1f };
 
 // =====================
 // UART SETTINGS
@@ -113,41 +105,14 @@ static const float TOF_OFFSET_IN[4] = { 1.85f, 1.85f, 1.1f, 1.1f };
 #define UART_BUF_SIZE       2048
 
 // =====================
-// SPI / ADXRS453 SETTINGS
+// LOOP TIMING
 // =====================
-
-// Start conservative. ADXRS453 supports a much higher max SPI clock,
-// but 1 MHz is easier to debug on jumper wires.
-#define ADXRS_SPI_CLOCK_HZ  1000000
-
-// ADXRS453 rate register scale: 80 LSB per deg/s.
-#define ADXRS_LSB_PER_DPS   80.0f
 
 // Main sensor loop: 200 Hz. UART output: 50 Hz.
 #define SENSOR_LOOP_HZ      200
 #define SENSOR_LOOP_MS      (1000 / SENSOR_LOOP_HZ)
 #define UART_OUTPUT_HZ      50
 #define OUTPUT_DECIMATION   (SENSOR_LOOP_HZ / UART_OUTPUT_HZ)
-
-// =====================
-// HEADING TUNING
-// =====================
-
-// Change to +1.0f if your heading sign is backwards.
-// With the old code, heading sign was -1, so I kept that convention.
-#define GYRO_SIGN           1.0f
-
-// Keep this small. ADXRS453 is already internally conditioned, so this
-// is only to suppress tiny near-zero residuals after bias calibration.
-#define GYRO_DEADBAND_DPS   0.02f
-
-// Tune only if a known 360 deg physical turn does not report close to 360.
-#define HEADING_SCALE       1.00f
-
-// Startup bias calibration. Keep the robot still during this period.
-// 1500 samples x 2 ms = ~3 s (under the 4 s power-up budget).
-#define GYRO_BIAS_SAMPLES   1500
-#define GYRO_BIAS_DELAY_MS  2
 
 static const char *TAG = "ESP32C6_ODOM_RAW";
 
@@ -161,19 +126,9 @@ static i2c_master_dev_handle_t as5600_handle;
 static i2c_master_dev_handle_t vl53_handle;
 static SemaphoreHandle_t i2c_mutex;
 
-static spi_device_handle_t adxrs_handle;
-
 // =====================
 // SMALL UTILS
 // =====================
-
-static float apply_deadband(float value, float deadband)
-{
-    if (value > -deadband && value < deadband) {
-        return 0.0f;
-    }
-    return value;
-}
 
 static int32_t wrap_encoder_delta(uint16_t now_raw, uint16_t last_raw)
 {
@@ -326,203 +281,6 @@ static void uart_init(void)
 
     ESP_LOGI(TAG, "UART%d initialized: TX=%d RX=%d baud=%d",
              UART_PORT_NUM, UART_TX_PIN, UART_RX_PIN, UART_BAUD_RATE);
-}
-
-// ============================================================
-// ADXRS453 SPI DRIVER
-// ============================================================
-
-static uint32_t adxrs453_add_odd_parity(uint32_t command)
-{
-    // Bit 0 is the command parity bit. It must make the whole 32-bit
-    // command have odd parity.
-    command &= ~1UL;
-
-    uint8_t ones = 0;
-    for (int bit = 31; bit >= 1; bit--) {
-        ones += (uint8_t)((command >> bit) & 0x1);
-    }
-
-    if ((ones % 2) == 0) {
-        command |= 1UL;
-    }
-
-    return command;
-}
-
-static esp_err_t adxrs453_transfer_u32(uint32_t tx_word, uint32_t *rx_word)
-{
-    uint8_t tx[4] = {
-        (uint8_t)((tx_word >> 24) & 0xFF),
-        (uint8_t)((tx_word >> 16) & 0xFF),
-        (uint8_t)((tx_word >> 8) & 0xFF),
-        (uint8_t)(tx_word & 0xFF),
-    };
-
-    uint8_t rx[4] = {0};
-
-    spi_transaction_t trans = {
-        .length = 32,
-        .tx_buffer = tx,
-        .rx_buffer = rx,
-    };
-
-    esp_err_t ret = spi_device_transmit(adxrs_handle, &trans);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    if (rx_word != NULL) {
-        *rx_word = ((uint32_t)rx[0] << 24) |
-                   ((uint32_t)rx[1] << 16) |
-                   ((uint32_t)rx[2] << 8)  |
-                   ((uint32_t)rx[3]);
-    }
-
-    return ESP_OK;
-}
-
-static uint32_t adxrs453_make_read_command(uint8_t reg_addr)
-{
-    // Same command layout used by Analog Devices no-OS driver:
-    // byte0 = READ bit | A8
-    // byte1 = A7..A0 shifted left by 1
-    uint8_t b0 = (uint8_t)(0x80 | (reg_addr >> 7));
-    uint8_t b1 = (uint8_t)(reg_addr << 1);
-
-    uint32_t cmd = ((uint32_t)b0 << 24) |
-                   ((uint32_t)b1 << 16);
-
-    return adxrs453_add_odd_parity(cmd);
-}
-
-static esp_err_t adxrs453_read_register16(uint8_t reg_addr, uint16_t *value)
-{
-    if (value == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    uint32_t cmd = adxrs453_make_read_command(reg_addr);
-    uint32_t resp = 0;
-
-    // ADXRS453 is command/response pipelined. The response to this
-    // read command comes back during the next SPI frame, so send twice.
-    esp_err_t ret = adxrs453_transfer_u32(cmd, &resp);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    ret = adxrs453_transfer_u32(cmd, &resp);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    // For a register read response, the 16-bit register value is positioned
-    // like the Analog Devices no-OS driver extracts it:
-    //   value = byte1<<11 | byte2<<3 | byte3>>5
-    uint8_t b1 = (uint8_t)((resp >> 16) & 0xFF);
-    uint8_t b2 = (uint8_t)((resp >> 8) & 0xFF);
-    uint8_t b3 = (uint8_t)(resp & 0xFF);
-
-    *value = ((uint16_t)b1 << 11) |
-             ((uint16_t)b2 << 3)  |
-             ((uint16_t)b3 >> 5);
-
-    return ESP_OK;
-}
-
-static esp_err_t adxrs453_read_rate_dps(float *rate_dps)
-{
-    if (rate_dps == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    uint16_t raw_u16 = 0;
-    esp_err_t ret = adxrs453_read_register16(0x00, &raw_u16); // RATE1/RATE0
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    int16_t raw_i16 = (int16_t)raw_u16;
-    *rate_dps = ((float)raw_i16) / ADXRS_LSB_PER_DPS;
-
-    return ESP_OK;
-}
-
-static void spi_init_adxrs453(void)
-{
-    spi_bus_config_t bus_cfg = {
-        .mosi_io_num = ADXRS_MOSI_PIN,
-        .miso_io_num = ADXRS_MISO_PIN,
-        .sclk_io_num = ADXRS_SCK_PIN,
-        .quadwp_io_num = GPIO_NUM_NC,
-        .quadhd_io_num = GPIO_NUM_NC,
-        .max_transfer_sz = 4,
-    };
-
-    ESP_ERROR_CHECK(spi_bus_initialize(ADXRS_SPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
-
-    spi_device_interface_config_t dev_cfg = {
-        .clock_speed_hz = ADXRS_SPI_CLOCK_HZ,
-        .mode = 0,                 // ADXRS453: CPOL=0, CPHA=0
-        .spics_io_num = ADXRS_CS_PIN,
-        .queue_size = 1,
-        .command_bits = 0,
-        .address_bits = 0,
-        .dummy_bits = 0,
-    };
-
-    ESP_ERROR_CHECK(spi_bus_add_device(ADXRS_SPI_HOST, &dev_cfg, &adxrs_handle));
-
-    // Datasheet startup recommendation: allow internal circuitry to initialize.
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    ESP_LOGI(TAG, "ADXRS453 SPI initialized: SCK=%d MOSI=%d MISO=%d CS=%d clk=%d Hz",
-             ADXRS_SCK_PIN, ADXRS_MOSI_PIN, ADXRS_MISO_PIN,
-             ADXRS_CS_PIN, ADXRS_SPI_CLOCK_HZ);
-
-    // Optional sanity check: PID register high byte is expected to begin with 0x52.
-    uint16_t pid = 0;
-    esp_err_t ret = adxrs453_read_register16(0x0C, &pid);
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "ADXRS453 PID register raw=0x%04X", pid);
-        if ((pid >> 8) != 0x52) {
-            ESP_LOGW(TAG, "ADXRS453 PID high byte was not 0x52. Check SPI wiring/mode if rate is wrong.");
-        }
-    } else {
-        ESP_LOGW(TAG, "Could not read ADXRS453 PID register: %s", esp_err_to_name(ret));
-    }
-}
-
-static float calibrate_gyro_bias_dps(int samples, int delay_ms)
-{
-    ESP_LOGI(TAG, "Calibrating ADXRS453 gyro bias (%d samples). Keep board still.",
-             samples);
-
-    float sum = 0.0f;
-    int good = 0;
-
-    for (int i = 0; i < samples; i++) {
-        float rate = 0.0f;
-        esp_err_t ret = adxrs453_read_rate_dps(&rate);
-
-        if (ret == ESP_OK) {
-            sum += rate;
-            good++;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
-    }
-
-    if (good == 0) {
-        ESP_LOGW(TAG, "No valid gyro samples during bias calibration. Using 0 dps bias.");
-        return 0.0f;
-    }
-
-    float bias = sum / (float)good;
-    ESP_LOGI(TAG, "Gyro bias = %.6f deg/s from %d samples", bias, good);
-
-    return bias;
 }
 
 // ============================================================
@@ -843,46 +601,6 @@ static esp_err_t vl53l0x_read_mm(uint8_t channel, uint16_t *mm)
 }
 
 // ============================================================
-// USB-C COMMAND INTERFACE (USB Serial/JTAG)
-// ------------------------------------------------------------
-// The native USB-C port is a secondary (output-only) console, so the
-// USB Serial/JTAG peripheral is free for us to read commands from the
-// Jetson. Single-character command:
-//   'R' (or 'Z') -> reset the gyro heading to 0 (instant, heading only)
-// ============================================================
-
-static void usb_cmd_init(void)
-{
-    usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
-    esp_err_t ret = usb_serial_jtag_driver_install(&cfg);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "USB Serial/JTAG command input unavailable: %s",
-                 esp_err_to_name(ret));
-    } else {
-        ESP_LOGI(TAG, "USB Serial/JTAG command input ready (R=reset gyro heading)");
-    }
-}
-
-// Non-blocking. Scans any bytes the Jetson sent and returns the last
-// recognized command character, or 0 if none. Tolerates line endings and
-// whole words (e.g. "RESET\n" matches 'R', "ZERO\n" matches 'Z').
-static char usb_cmd_poll(void)
-{
-    uint8_t buf[32];
-    int n = usb_serial_jtag_read_bytes(buf, sizeof(buf), 0);
-    char cmd = 0;
-
-    for (int i = 0; i < n; i++) {
-        char c = (char)buf[i];
-        if (c == 'Z' || c == 'z' || c == 'R' || c == 'r') {
-            cmd = c;  // last recognized command in this batch wins
-        }
-    }
-
-    return cmd;
-}
-
-// ============================================================
 // MAIN
 // ============================================================
 
@@ -890,10 +608,6 @@ void app_main(void)
 {
     i2c_init();
     uart_init();
-    spi_init_adxrs453();
-    usb_cmd_init();
-
-    float gyro_bias_dps = calibrate_gyro_bias_dps(GYRO_BIAS_SAMPLES, GYRO_BIAS_DELAY_MS);
 
     // Initialize encoders so the first packet does not contain a fake jump.
     uint16_t enc1_last_raw = 0;
@@ -908,20 +622,20 @@ void app_main(void)
         if (!enc1_ready) {
             if (as5600_read_raw(ENC1_CHANNEL, &enc1_last_raw) == ESP_OK) {
                 enc1_ready = true;
-                ESP_LOGI(TAG, "Encoder 1 initialized on mux channel %d raw=%u",
+                ESP_LOGI(TAG, "Vertical encoder (DENC1) initialized on mux channel %d raw=%u",
                          ENC1_CHANNEL, enc1_last_raw);
             } else {
-                ESP_LOGD(TAG, "Waiting for Encoder 1 on mux channel %d", ENC1_CHANNEL);
+                ESP_LOGD(TAG, "Waiting for vertical encoder on mux channel %d", ENC1_CHANNEL);
             }
         }
 
         if (!enc2_ready) {
             if (as5600_read_raw(ENC2_CHANNEL, &enc2_last_raw) == ESP_OK) {
                 enc2_ready = true;
-                ESP_LOGI(TAG, "Encoder 2 initialized on mux channel %d raw=%u",
+                ESP_LOGI(TAG, "Horizontal encoder (DENC2) initialized on mux channel %d raw=%u",
                          ENC2_CHANNEL, enc2_last_raw);
             } else {
-                ESP_LOGD(TAG, "Waiting for Encoder 2 on mux channel %d", ENC2_CHANNEL);
+                ESP_LOGD(TAG, "Waiting for horizontal encoder on mux channel %d", ENC2_CHANNEL);
             }
         }
 
@@ -932,17 +646,19 @@ void app_main(void)
     }
 
     if (!enc1_ready) {
-        ESP_LOGW(TAG, "Encoder 1 timeout, continuing without it");
+        ESP_LOGW(TAG, "Vertical encoder timeout, continuing without it");
     }
     if (!enc2_ready) {
-        ESP_LOGW(TAG, "Encoder 2 timeout, continuing without it");
+        ESP_LOGW(TAG, "Horizontal encoder timeout, continuing without it");
     }
 
     // Initialize the four VL53L0X TOF sensors (one per mux channel) and start
-    // continuous ranging. Sensors that fail init are skipped and report 0 mm.
+    // continuous ranging. Sensors that fail init are skipped and report 0.
+    // Order matches the packet field order: FRONT, RIGHT, LEFT, LBACK.
     const uint8_t tof_channels[4] = {
-        VL53L0X_CH_0, VL53L0X_CH_1, VL53L0X_CH_2, VL53L0X_CH_3
+        TOF_FRONT_CH, TOF_RIGHT_CH, TOF_LEFT_CH, TOF_LBACK_CH
     };
+    const char *tof_names[4] = { "FRONT", "RIGHT", "LEFT", "LBACK" };
     bool tof_ready[4] = { false, false, false, false };
     uint16_t tof_mm[4] = { 0, 0, 0, 0 };
     int tof_service_idx = 0;
@@ -951,39 +667,24 @@ void app_main(void)
         esp_err_t ret = vl53l0x_init_channel(tof_channels[i]);
         if (ret == ESP_OK) {
             tof_ready[i] = true;
-            ESP_LOGI(TAG, "TOF%d initialized on mux channel %d", i + 1, tof_channels[i]);
+            ESP_LOGI(TAG, "TOF %s initialized on mux channel %d", tof_names[i], tof_channels[i]);
         } else {
-            ESP_LOGW(TAG, "TOF%d init failed on mux channel %d: %s",
-                     i + 1, tof_channels[i], esp_err_to_name(ret));
+            ESP_LOGW(TAG, "TOF %s init failed on mux channel %d: %s",
+                     tof_names[i], tof_channels[i], esp_err_to_name(ret));
         }
     }
-
-    float heading_deg = 0.0f;
-    float last_rate_dps = 0.0f;
-    bool have_last_rate = false;
 
     int32_t enc1_delta_accum = 0;
     int32_t enc2_delta_accum = 0;
 
     int output_countdown = 0;
-    int64_t last_loop_time_us = esp_timer_get_time();
 
     TickType_t last_wake = xTaskGetTickCount();
 
-    ESP_LOGI(TAG, "Streaming UART frames: DENC1=<ticks>,DENC2=<ticks>,H=<deg>,"
-                  "TOF1..4=<in>");
+    ESP_LOGI(TAG, "Streaming UART frames: DENC1=<ticks>,DENC2=<ticks>,"
+                  "FRONT=<in>,RIGHT=<in>,LEFT=<in>,LBACK=<in>");
 
     while (1) {
-        // -------------------------
-        // 0) Handle gyro-reset commands from the Jetson over USB-C
-        // -------------------------
-        char cmd = usb_cmd_poll();
-        if (cmd == 'R' || cmd == 'r' || cmd == 'Z' || cmd == 'z') {
-            heading_deg = 0.0f;
-            have_last_rate = false;
-            ESP_LOGW(TAG, "CMD %c: gyro heading reset to 0", cmd);
-        }
-
         // -------------------------
         // 1) Read encoders and accumulate deltas
         // -------------------------
@@ -1009,38 +710,7 @@ void app_main(void)
         }
 
         // -------------------------
-        // 2) Read gyro rate and integrate heading
-        // -------------------------
-        int64_t now_us = esp_timer_get_time();
-        float dt = (float)(now_us - last_loop_time_us) / 1000000.0f;
-        last_loop_time_us = now_us;
-
-        // Avoid weird integration if the loop is paused by debugging/logging.
-        if (dt < 0.0f || dt > 0.100f) {
-            dt = (float)SENSOR_LOOP_MS / 1000.0f;
-        }
-
-        float rate_dps = 0.0f;
-        esp_err_t gyro_ret = adxrs453_read_rate_dps(&rate_dps);
-
-        if (gyro_ret == ESP_OK) {
-            rate_dps = (rate_dps - gyro_bias_dps) * GYRO_SIGN * HEADING_SCALE;
-            rate_dps = apply_deadband(rate_dps, GYRO_DEADBAND_DPS);
-
-            if (!have_last_rate) {
-                last_rate_dps = rate_dps;
-                have_last_rate = true;
-            }
-
-            // Trapezoidal integration of angular rate.
-            heading_deg += 0.5f * (last_rate_dps + rate_dps) * dt;
-            last_rate_dps = rate_dps;
-        } else {
-            ESP_LOGW(TAG, "ADXRS453 rate read failed: %s", esp_err_to_name(gyro_ret));
-        }
-
-        // -------------------------
-        // 3) Service one TOF sensor per loop (round-robin, non-blocking).
+        // 2) Service one TOF sensor per loop (round-robin, non-blocking).
         //    With 4 sensors at a 200 Hz loop, each updates at ~50 Hz, which
         //    comfortably keeps up with the VL53L0X ~30 Hz ranging rate.
         // -------------------------
@@ -1053,7 +723,7 @@ void app_main(void)
         tof_service_idx = (tof_service_idx + 1) % 4;
 
         // -------------------------
-        // 4) Output incremental packet over UART/RS485 at 50 Hz
+        // 3) Output incremental packet over UART/RS485 at 50 Hz
         // -------------------------
         output_countdown++;
         if (output_countdown >= OUTPUT_DECIMATION) {
@@ -1078,22 +748,21 @@ void app_main(void)
             int len = snprintf(
                 msg,
                 sizeof(msg),
-                "DENC1=%ld,DENC2=%ld,H=%.4f,TOF1=%.2f,TOF2=%.2f,TOF3=%.2f,TOF4=%.2f\n",
+                "DENC1=%ld,DENC2=%ld,FRONT=%.2f,RIGHT=%.2f,LEFT=%.2f,LBACK=%.2f\n",
                 (long)denc1_out,
                 (long)denc2_out,
-                heading_deg,
-                tof_in[0],
-                tof_in[1],
-                tof_in[2],
-                tof_in[3]
+                tof_in[0],   // FRONT
+                tof_in[1],   // RIGHT
+                tof_in[2],   // LEFT
+                tof_in[3]    // LBACK
             );
 
             if (len > 0) {
                 uart_write_bytes(UART_PORT_NUM, msg, len);
             }
 
-            ESP_LOGW(TAG, "DENC1=%ld DENC2=%ld H=%.4f° TOF=[%.2f %.2f %.2f %.2f] in",
-                     (long)denc1_out, (long)denc2_out, heading_deg,
+            ESP_LOGW(TAG, "DENC1=%ld DENC2=%ld FRONT=%.2f RIGHT=%.2f LEFT=%.2f LBACK=%.2f in",
+                     (long)denc1_out, (long)denc2_out,
                      tof_in[0], tof_in[1], tof_in[2], tof_in[3]);
         }
 
